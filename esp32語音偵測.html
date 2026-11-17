@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#101827">
+<title>GO STEAM AI 聲音啟動控制</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;padding:22px;background:#101827;color:#f8fafc;font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif}.wrap{max-width:560px;margin:18px auto}.panel{background:#1e293b;border:1px solid #334155;border-radius:20px;padding:22px;margin:14px 0}h1{font-size:25px;color:#93c5fd;margin:0 0 8px}.muted{color:#aab7c8;line-height:1.65}.status{padding:13px;border-radius:12px;background:#334155;margin:10px 0}.value{font-size:20px;font-weight:700}.btn{width:100%;border:0;border-radius:13px;padding:16px;margin:7px 0;font-size:17px;font-weight:700;color:white;background:#2563eb}.green{background:#059669}.red{background:#dc2626}.gray{background:#475569}.btn:disabled{opacity:.45}.small{font-size:13px;color:#aab7c8}.pill{display:inline-block;padding:4px 9px;border-radius:99px;background:#334155;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+ <section class="panel">
+  <h1>GO STEAM AI 聲音啟動系統</h1>
+  <p class="muted">說出「開始」或「停止」，透過藍牙 BLE 控制 ESP32 伺服馬達。</p>
+  <div class="status"><div class="small">ESP32 藍牙連線</div><div class="value" id="bleStatus">尚未連線</div></div>
+  <button class="btn green" id="connectBtn">連接 ESP32（BLE）</button>
+  <div class="status"><div class="small">語音辨識結果</div><div class="value" id="heard">等待語音輸入…</div></div>
+  <button class="btn" id="listenBtn">🎤 開始聆聽</button>
+  <div class="status"><div class="small">機構狀態</div><div class="value" id="motorStatus">待機：0°</div></div>
+  <button class="btn green" id="startBtn">手動啟動：轉到 90°</button>
+  <button class="btn red" id="stopBtn">停止／復位：回到 0°</button>
+  <p class="small">語音口令：開始、啟動、停止、暫停。第一次使用請先連接 ESP32，再允許麥克風權限。</p>
+ </section>
+ <section class="panel">
+  <b>使用提醒</b>
+  <p class="muted small">請使用 Android Chrome 開啟 HTTPS 網址。此版本透過 BLE 傳送指令，不使用 ESP32 的 Wi-Fi 傳送馬達命令。語音辨識使用瀏覽器提供的語音服務，需有網路連線且支援 SpeechRecognition。</p>
+ </section>
+</div>
+<script>
+const SERVICE_UUID = '7d2ea28a-f7bd-485a-bd9d-92ad6ecfe93e';
+const CHARACTERISTIC_UUID = '7d2ea28b-f7bd-485a-bd9d-92ad6ecfe93e';
+let bleDevice=null, commandChar=null, recognition=null, listening=false;
+const $=id=>document.getElementById(id);
+function logStatus(message){$('bleStatus').textContent=message;}
+async function connectBLE(){
+ if(!navigator.bluetooth){alert('此瀏覽器不支援 Web Bluetooth。請使用 Android Chrome，並以 HTTPS 網址開啟。');return;}
+ try{
+  $('connectBtn').disabled=true;logStatus('正在搜尋 ESP32…');
+  bleDevice=await navigator.bluetooth.requestDevice({filters:[{name:'GO-STEAM-AI'}],optionalServices:[SERVICE_UUID]});
+  bleDevice.addEventListener('gattserverdisconnected',()=>{commandChar=null;logStatus('已中斷連線');});
+  const server=await bleDevice.gatt.connect();
+  const service=await server.getPrimaryService(SERVICE_UUID);
+  commandChar=await service.getCharacteristic(CHARACTERISTIC_UUID);
+  logStatus('已連接：'+(bleDevice.name||'GO-STEAM-AI'));
+ }catch(e){logStatus('連線失敗');alert('藍牙連線失敗：'+e.message);}
+ finally{$('connectBtn').disabled=false;}
+}
+async function sendCommand(cmd){
+ if(!commandChar){alert('請先連接 ESP32 藍牙。');return;}
+ try{
+  const data=new TextEncoder().encode(cmd);
+  if(commandChar.writeValueWithResponse) await commandChar.writeValueWithResponse(data);
+  else await commandChar.writeValue(data);
+  $('motorStatus').textContent=cmd==='START'?'已啟動：90°':'已復位：0°';
+ }catch(e){alert('指令傳送失敗：'+e.message);}
+}
+async function startVoice(){
+ const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
+ if(!SpeechRecognition){
+  alert('此瀏覽器不支援語音辨識。請使用最新版 Android Chrome。');
+  return;
+ }
+ if(!commandChar){
+  alert('請先連接 ESP32 藍牙。');
+  return;
+ }
+ if(listening){
+  try{recognition.stop();}catch(_){}
+  return;
+ }
+
+ // 主動觸發 Chrome 麥克風權限視窗
+ if(!window.isSecureContext){
+  alert('目前不是安全的 HTTPS 網址。請用 https:// 開頭的網址開啟網站。');
+  return;
+ }
+ if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+  alert('此頁面無法呼叫麥克風。請確認使用 Android Chrome，並檢查網站權限。');
+  return;
+ }
+ let micStream;
+ try{
+  micStream=await navigator.mediaDevices.getUserMedia({audio:true});
+  micStream.getTracks().forEach(track=>track.stop());
+ }catch(e){
+  $('heard').textContent='麥克風無法使用：'+e.name;
+  if(e.name==='NotAllowedError' || e.name==='PermissionDeniedError'){
+   alert('麥克風權限被拒絕。請在 HTC：設定 → 應用程式 → Chrome → 權限 → 麥克風，設定為允許；再到 Chrome 網址列左側的網站設定，允許麥克風。');
+  }else{
+   alert('無法開啟麥克風：'+e.name+'：'+e.message);
+  }
+  return;
+ }
+
+ recognition=new SpeechRecognition();
+ recognition.lang='zh-TW';
+ recognition.continuous=false;
+ recognition.interimResults=false;
+ recognition.maxAlternatives=1;
+ recognition.onstart=()=>{
+  listening=true;
+  $('listenBtn').textContent='正在聆聽…（點此停止）';
+  $('heard').textContent='請說：開始或停止';
+ };
+ recognition.onresult=async ev=>{
+  const phrase=ev.results[0][0].transcript.trim();
+  $('heard').textContent=phrase;
+  if(phrase.includes('開始')||phrase.includes('啟動')) await sendCommand('START');
+  else if(phrase.includes('停止')||phrase.includes('暫停')) await sendCommand('STOP');
+  else $('motorStatus').textContent='未辨識到有效口令';
+ };
+ recognition.onerror=ev=>{
+  $('heard').textContent='辨識錯誤：'+ev.error;
+  if(ev.error==='not-allowed'){
+   alert('Chrome 未允許語音辨識。請檢查網站麥克風權限及 HTC 的 Chrome 麥克風權限。');
+  }
+ };
+ recognition.onend=()=>{
+  listening=false;
+  $('listenBtn').textContent='🎤 開始聆聽';
+ };
+ try{recognition.start();}
+ catch(e){$('heard').textContent='無法開始：'+e.message;}
+}
+$('connectBtn').addEventListener('click',connectBLE);
+$('listenBtn').addEventListener('click',startVoice);
+$('startBtn').addEventListener('click',()=>sendCommand('START'));
+$('stopBtn').addEventListener('click',()=>sendCommand('STOP'));
+</script>
+</body>
+</html>
